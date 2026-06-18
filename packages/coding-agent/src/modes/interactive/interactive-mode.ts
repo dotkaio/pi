@@ -3738,7 +3738,7 @@ export class InteractiveMode {
 	}
 
 	showNewVersionNotification(release: LatestPiRelease): void {
-		const updateCommand = theme.fg("accent", `export PI_ALLOW_LOCKFILE_CHANGE=1\n${APP_NAME} update`);
+		const updateCommand = theme.fg("accent", `${APP_NAME} update`);
 		const updateInstruction =
 			theme.fg("muted", `New version ${release.version} is available. Run:\n`) + updateCommand;
 		const changelogUrl = "https://pi.dev/changelog";
@@ -3768,7 +3768,7 @@ export class InteractiveMode {
 	}
 
 	showPackageUpdateNotification(packages: string[]): void {
-		const updateCommand = theme.fg("accent", `export PI_ALLOW_LOCKFILE_CHANGE=1\n${APP_NAME} update`);
+		const updateCommand = theme.fg("accent", `${APP_NAME} update`);
 		const updateInstruction = theme.fg("muted", "Package updates are available. Run:\n") + updateCommand;
 		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 

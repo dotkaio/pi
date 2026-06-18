@@ -4,7 +4,6 @@
 
 ### Fixed
 
-- Fixed interactive update notifications to show `export PI_ALLOW_LOCKFILE_CHANGE=1` before `pi update`.
 - Fixed built-in dark and light TUI themes to use Atom One Dark and One Light color hashes and automatically follow macOS system appearance changes.
 - Fixed inherited Google and `google-vertex` Gemini model metadata to map `latest` aliases to the current models, add Gemini 3.5 Flash for Vertex, correct Gemini 2.5 Flash Vertex cache pricing, and remove shut-down Vertex preview models ([#5761](https://github.com/earendil-works/pi/issues/5761)).
 - Fixed the session selector to stay open and show the all-sessions empty state when both current-folder and all-scope session lists are empty ([#5747](https://github.com/earendil-works/pi/issues/5747)).
