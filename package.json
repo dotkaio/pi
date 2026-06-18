@@ -57,5 +57,8 @@
 		"gaxios": {
 			"rimraf": "6.1.2"
 		}
+	},
+	"dependencies": {
+		"vitest": "3.2.6"
 	}
 }

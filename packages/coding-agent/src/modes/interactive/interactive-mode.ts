@@ -129,6 +129,7 @@ import {
 	detectTerminalBackgroundTheme,
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
+	getCurrentThemeName,
 	getEditorTheme,
 	getMarkdownTheme,
 	getThemeByName,
@@ -740,11 +741,23 @@ export class InteractiveMode {
 		this.renderInitialMessages();
 
 		// Set up theme file watcher
-		onThemeChange(() => {
+		onThemeChange((themeName, source) => {
+			if (source === "system" && this.settingsManager.getTheme() !== themeName) {
+				this.settingsManager.setTheme(themeName);
+				void this.settingsManager.flush();
+			}
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
 			this.ui.requestRender();
 		});
+		const currentThemeName = getCurrentThemeName();
+		if (
+			(currentThemeName === "dark" || currentThemeName === "light") &&
+			this.settingsManager.getTheme() !== currentThemeName
+		) {
+			this.settingsManager.setTheme(currentThemeName);
+			void this.settingsManager.flush();
+		}
 
 		// Set up git branch watcher (uses provider instead of footer)
 		this.footerDataProvider.onBranchChange(() => {
@@ -3725,8 +3738,9 @@ export class InteractiveMode {
 	}
 
 	showNewVersionNotification(release: LatestPiRelease): void {
-		const action = theme.fg("accent", `${APP_NAME} update`);
-		const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
+		const updateCommand = theme.fg("accent", `export PI_ALLOW_LOCKFILE_CHANGE=1\n${APP_NAME} update`);
+		const updateInstruction =
+			theme.fg("muted", `New version ${release.version} is available. Run:\n`) + updateCommand;
 		const changelogUrl = "https://pi.dev/changelog";
 		const changelogLink = getCapabilities().hyperlinks
 			? hyperlink(theme.fg("accent", "open changelog"), changelogUrl)
@@ -3754,8 +3768,8 @@ export class InteractiveMode {
 	}
 
 	showPackageUpdateNotification(packages: string[]): void {
-		const action = theme.fg("accent", `${APP_NAME} update`);
-		const updateInstruction = theme.fg("muted", "Package updates are available. Run ") + action;
+		const updateCommand = theme.fg("accent", `export PI_ALLOW_LOCKFILE_CHANGE=1\n${APP_NAME} update`);
+		const updateInstruction = theme.fg("muted", "Package updates are available. Run:\n") + updateCommand;
 		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 
 		this.chatContainer.addChild(new Spacer(1));

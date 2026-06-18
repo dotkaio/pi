@@ -28,6 +28,181 @@ interface ScopedModelItem {
 
 type ModelScope = "all" | "scoped";
 
+interface VercelGatewayModelMetadata {
+	id?: unknown;
+	name?: unknown;
+	released?: unknown;
+	owned_by?: unknown;
+}
+
+const VERCEL_MODELS_URL = "https://ai-gateway.vercel.sh/v1/models";
+let vercelReleaseDatesPromise: Promise<Map<string, string>> | undefined;
+
+const PROVIDER_TO_VERCEL_OWNER: Record<string, string> = {
+	"amazon-bedrock": "anthropic",
+	anthropic: "anthropic",
+	google: "google",
+	"google-vertex": "google",
+	openai: "openai",
+	"openai-codex": "openai",
+	xai: "xai",
+	groq: "groq",
+	mistral: "mistral",
+	moonshotai: "moonshotai",
+	"moonshotai-cn": "moonshotai",
+	zai: "zai",
+	"zai-coding-cn": "zai",
+};
+
+const MODEL_COLUMN_WIDTH = 30;
+const CONTEXT_COLUMN_WIDTH = 8;
+const PRICE_COLUMN_WIDTH = 9;
+const PROVIDER_COLUMN_WIDTH = 18;
+const RELEASE_DATE_COLUMN_WIDTH = 12;
+
+function truncateCell(value: string, width: number): string {
+	if (value.length <= width) return value.padEnd(width);
+	if (width <= 1) return value.slice(0, width);
+	return `${value.slice(0, width - 1)}…`;
+}
+
+function formatTokenCount(count: number): string {
+	if (!Number.isFinite(count) || count <= 0) return "-";
+	if (count >= 1_000_000) {
+		const millions = count / 1_000_000;
+		return millions % 1 === 0 ? `${millions}M` : `${millions.toFixed(1)}M`;
+	}
+	if (count >= 1_000) {
+		const thousands = count / 1_000;
+		return thousands % 1 === 0 ? `${thousands}K` : `${thousands.toFixed(1)}K`;
+	}
+	return count.toString();
+}
+
+function formatPrice(price: number): string {
+	if (!Number.isFinite(price)) return "-";
+	if (price === 0) return "$0/M";
+	const digits = price < 0.01 ? 4 : price < 1 ? 3 : 2;
+	return `$${price.toFixed(digits).replace(/\.0+$|(?<=\.\d*[1-9])0+$/u, "")}/M`;
+}
+
+function formatDateParts(year: number, month: number, day: number): string | undefined {
+	const date = new Date(Date.UTC(year, month - 1, day));
+	if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+		return undefined;
+	}
+	return `${month.toString().padStart(2, "0")}/${day.toString().padStart(2, "0")}/${year}`;
+}
+
+function formatDateValue(value: unknown): string | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) {
+		const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
+		const date = new Date(milliseconds);
+		return formatDateParts(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+	}
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	const separated = /(?:^|\D)(\d{4})[-_.](\d{2})[-_.](\d{2})(?:\D|$)/u.exec(trimmed);
+	if (separated) {
+		return formatDateParts(Number(separated[1]), Number(separated[2]), Number(separated[3]));
+	}
+	const compact = /(?:^|\D)(\d{4})(\d{2})(\d{2})(?:\D|$)/u.exec(trimmed);
+	if (compact) {
+		return formatDateParts(Number(compact[1]), Number(compact[2]), Number(compact[3]));
+	}
+	return undefined;
+}
+
+function normalizeVercelModelKey(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/^global\./u, "")
+		.replace(/^models\//u, "")
+		.replace(/[._]/gu, "-");
+}
+
+function addVercelReleaseDateKey(dates: Map<string, string>, key: string, date: string): void {
+	if (!key) return;
+	const normalized = normalizeVercelModelKey(key);
+	if (!dates.has(normalized)) {
+		dates.set(normalized, date);
+	}
+}
+
+async function getVercelReleaseDates(): Promise<Map<string, string>> {
+	if (process.env.PI_OFFLINE === "1") return new Map<string, string>();
+	vercelReleaseDatesPromise ??= fetch(VERCEL_MODELS_URL)
+		.then(async (response) => {
+			if (!response.ok) return new Map<string, string>();
+			const data = (await response.json()) as { data?: unknown };
+			const items = Array.isArray(data.data) ? data.data : [];
+			const dates = new Map<string, string>();
+
+			for (const rawItem of items) {
+				const item = rawItem as VercelGatewayModelMetadata;
+				if (typeof item.id !== "string") continue;
+
+				const date = formatDateValue(item.released);
+				if (!date) continue;
+
+				addVercelReleaseDateKey(dates, item.id, date);
+				const slashIndex = item.id.indexOf("/");
+				if (slashIndex >= 0) {
+					addVercelReleaseDateKey(dates, item.id.slice(slashIndex + 1), date);
+				}
+				if (typeof item.name === "string") {
+					addVercelReleaseDateKey(dates, item.name, date);
+				}
+				if (typeof item.owned_by === "string" && slashIndex >= 0) {
+					addVercelReleaseDateKey(dates, `${item.owned_by}/${item.id.slice(slashIndex + 1)}`, date);
+				}
+			}
+
+			return dates;
+		})
+		.catch(() => new Map<string, string>());
+	return vercelReleaseDatesPromise;
+}
+
+function getReleaseDate(item: ModelItem, vercelReleaseDates: ReadonlyMap<string, string>): string {
+	const vercelOwner = PROVIDER_TO_VERCEL_OWNER[item.provider];
+	const keys = [
+		item.id,
+		item.model.name,
+		vercelOwner ? `${vercelOwner}/${item.id}` : undefined,
+		item.provider === "vercel-ai-gateway" ? item.id : undefined,
+	].filter((key): key is string => typeof key === "string" && key.length > 0);
+
+	for (const key of keys) {
+		const date = vercelReleaseDates.get(normalizeVercelModelKey(key));
+		if (date) return date;
+	}
+	return "-";
+}
+
+function formatModelTableRow(item: ModelItem, vercelReleaseDates: ReadonlyMap<string, string>): string {
+	const modelName = item.model.name || item.id;
+	return [
+		truncateCell(modelName, MODEL_COLUMN_WIDTH),
+		formatTokenCount(item.model.contextWindow).padStart(CONTEXT_COLUMN_WIDTH),
+		formatPrice(item.model.cost.input).padStart(PRICE_COLUMN_WIDTH),
+		formatPrice(item.model.cost.output).padStart(PRICE_COLUMN_WIDTH),
+		truncateCell(item.provider, PROVIDER_COLUMN_WIDTH),
+		getReleaseDate(item, vercelReleaseDates).padEnd(RELEASE_DATE_COLUMN_WIDTH),
+	].join("  ");
+}
+
+function formatModelTableHeader(): string {
+	return [
+		"Model".padEnd(MODEL_COLUMN_WIDTH),
+		"Context".padStart(CONTEXT_COLUMN_WIDTH),
+		"Input".padStart(PRICE_COLUMN_WIDTH),
+		"Output".padStart(PRICE_COLUMN_WIDTH),
+		"Provider".padEnd(PROVIDER_COLUMN_WIDTH),
+		"Release date".padEnd(RELEASE_DATE_COLUMN_WIDTH),
+	].join("  ");
+}
+
 /**
  * Component that renders a model selector with search
  */
@@ -56,6 +231,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private onCancelCallback: () => void;
 	private errorMessage?: string;
 	private tui: TUI;
+	private vercelReleaseDates: ReadonlyMap<string, string> = new Map();
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
 	private scope: ModelScope = "all";
 	private scopeText?: Text;
@@ -131,6 +307,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			}
 			// Request re-render after models are loaded
 			this.tui.requestRender();
+			void this.loadVercelReleaseDates();
 		});
 	}
 
@@ -178,6 +355,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
 		this.selectedIndex =
 			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+	}
+
+	private async loadVercelReleaseDates(): Promise<void> {
+		this.vercelReleaseDates = await getVercelReleaseDates();
+		this.updateList();
+		this.tui.requestRender();
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
@@ -237,6 +420,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		);
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
 
+		if (this.filteredModels.length > 0) {
+			this.listContainer.addChild(new Text(theme.fg("muted", `  ${formatModelTableHeader()}`), 0, 0));
+		}
+
 		// Show visible slice of filtered models
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i];
@@ -244,22 +431,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 			const isSelected = i === this.selectedIndex;
 			const isCurrent = modelsAreEqual(this.currentModel, item.model);
+			const prefix = isSelected ? "→ " : "  ";
+			const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+			const line = `${prefix}${formatModelTableRow(item, this.vercelReleaseDates)}${checkmark}`;
 
-			let line = "";
-			if (isSelected) {
-				const prefix = theme.fg("accent", "→ ");
-				const modelText = `${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${checkmark}`;
-			} else {
-				const modelText = `  ${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${modelText} ${providerBadge}${checkmark}`;
-			}
-
-			this.listContainer.addChild(new Text(line, 0, 0));
+			this.listContainer.addChild(new Text(isSelected ? theme.fg("accent", line) : line, 0, 0));
 		}
 
 		// Add scroll indicator if needed
@@ -280,7 +456,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		} else {
 			const selected = this.filteredModels[this.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+			this.listContainer.addChild(
+				new Text(theme.fg("muted", `  ${selected.provider}/${selected.id} · ${selected.model.name}`), 0, 0),
+			);
 		}
 	}
 

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -627,7 +628,7 @@ export type TerminalTheme = "dark" | "light";
 
 export interface TerminalThemeDetection {
 	theme: TerminalTheme;
-	source: "terminal background" | "COLORFGBG" | "fallback";
+	source: "system appearance" | "terminal background" | "COLORFGBG" | "fallback";
 	detail: string;
 	confidence: "high" | "low";
 }
@@ -672,6 +673,35 @@ export function getThemeForRgbColor(rgb: RgbColor): TerminalTheme {
 	return getRgbColorLuminance(rgb) >= 0.5 ? "light" : "dark";
 }
 
+function getMacSystemAppearance(): Promise<TerminalTheme | undefined> {
+	if (process.platform !== "darwin") {
+		return Promise.resolve(undefined);
+	}
+
+	return new Promise((resolve) => {
+		execFile("defaults", ["read", "-g", "AppleInterfaceStyle"], { timeout: 1000 }, (error, stdout) => {
+			if (error) {
+				resolve("light");
+				return;
+			}
+			resolve(stdout.trim().toLowerCase() === "dark" ? "dark" : "light");
+		});
+	});
+}
+
+export async function detectSystemAppearanceTheme(): Promise<TerminalThemeDetection | undefined> {
+	const theme = await getMacSystemAppearance();
+	if (!theme) {
+		return undefined;
+	}
+	return {
+		theme,
+		source: "system appearance",
+		detail: `macOS appearance ${theme}`,
+		confidence: "high",
+	};
+}
+
 export function detectTerminalBackgroundFromEnv(options: TerminalThemeDetectionOptions = {}): TerminalThemeDetection {
 	const env = options.env ?? process.env;
 	const colorfgbg = env.COLORFGBG || "";
@@ -698,6 +728,11 @@ export async function detectTerminalBackgroundTheme({
 	timeoutMs,
 	env,
 }: TerminalBackgroundThemeDetectionOptions): Promise<TerminalThemeDetection> {
+	const systemAppearance = await detectSystemAppearanceTheme();
+	if (systemAppearance) {
+		return systemAppearance;
+	}
+
 	try {
 		const rgb = await ui.queryTerminalBackgroundColor({ timeoutMs });
 		if (rgb) {
@@ -743,9 +778,13 @@ function setGlobalTheme(t: Theme): void {
 }
 
 let currentThemeName: string | undefined;
+let followSystemTheme = false;
 let themeWatcher: fs.FSWatcher | undefined;
 let themeReloadTimer: NodeJS.Timeout | undefined;
-let onThemeChangeCallback: (() => void) | undefined;
+let systemThemeWatcherTimer: NodeJS.Timeout | undefined;
+let isCheckingSystemTheme = false;
+export type ThemeChangeSource = "manual" | "system" | "file" | "instance";
+let onThemeChangeCallback: ((themeName: string, source: ThemeChangeSource) => void) | undefined;
 const registeredThemes = new Map<string, Theme>();
 
 export function setRegisteredThemes(themes: Theme[]): void {
@@ -759,6 +798,7 @@ export function setRegisteredThemes(themes: Theme[]): void {
 
 export function initTheme(themeName?: string, enableWatcher: boolean = false): void {
 	const name = themeName ?? getDefaultTheme();
+	followSystemTheme = themeName === undefined;
 	currentThemeName = name;
 	try {
 		setGlobalTheme(loadTheme(name));
@@ -767,6 +807,7 @@ export function initTheme(themeName?: string, enableWatcher: boolean = false): v
 		}
 	} catch (_error) {
 		// Theme is invalid - fall back to dark theme silently
+		followSystemTheme = false;
 		currentThemeName = "dark";
 		setGlobalTheme(loadTheme("dark"));
 		// Don't start watcher for fallback theme
@@ -775,18 +816,20 @@ export function initTheme(themeName?: string, enableWatcher: boolean = false): v
 
 export function setTheme(name: string, enableWatcher: boolean = false): { success: boolean; error?: string } {
 	currentThemeName = name;
+	followSystemTheme = false;
 	try {
 		setGlobalTheme(loadTheme(name));
 		if (enableWatcher) {
 			startThemeWatcher();
 		}
 		if (onThemeChangeCallback) {
-			onThemeChangeCallback();
+			onThemeChangeCallback(currentThemeName, "manual");
 		}
 		return { success: true };
 	} catch (error) {
 		// Theme is invalid - fall back to dark theme
 		currentThemeName = "dark";
+		followSystemTheme = false;
 		setGlobalTheme(loadTheme("dark"));
 		// Don't start watcher for fallback theme
 		return {
@@ -799,21 +842,80 @@ export function setTheme(name: string, enableWatcher: boolean = false): { succes
 export function setThemeInstance(themeInstance: Theme): void {
 	setGlobalTheme(themeInstance);
 	currentThemeName = "<in-memory>";
+	followSystemTheme = false;
 	stopThemeWatcher(); // Can't watch a direct instance
 	if (onThemeChangeCallback) {
-		onThemeChangeCallback();
+		onThemeChangeCallback(currentThemeName ?? themeInstance.name ?? "<in-memory>", "instance");
 	}
 }
 
-export function onThemeChange(callback: () => void): void {
+export function onThemeChange(callback: (themeName: string, source: ThemeChangeSource) => void): void {
 	onThemeChangeCallback = callback;
+}
+
+export function getCurrentThemeName(): string | undefined {
+	return currentThemeName;
+}
+
+function isSystemThemeName(themeName: string | undefined): themeName is TerminalTheme {
+	return themeName === "dark" || themeName === "light";
+}
+
+function notifyThemeChanged(source: ThemeChangeSource): void {
+	if (currentThemeName && onThemeChangeCallback) {
+		onThemeChangeCallback(currentThemeName, source);
+	}
+}
+
+function startSystemThemeWatcher(): void {
+	stopSystemThemeWatcher();
+	if (!followSystemTheme || !isSystemThemeName(currentThemeName)) {
+		return;
+	}
+
+	const checkSystemTheme = async () => {
+		if (isCheckingSystemTheme || !followSystemTheme || !isSystemThemeName(currentThemeName)) {
+			return;
+		}
+		isCheckingSystemTheme = true;
+		try {
+			const detection = await detectSystemAppearanceTheme();
+			if (!detection || detection.theme === currentThemeName) {
+				return;
+			}
+			currentThemeName = detection.theme;
+			setGlobalTheme(loadTheme(detection.theme));
+			notifyThemeChanged("system");
+		} catch {
+			// Ignore system appearance detection failures and keep the current theme.
+		} finally {
+			isCheckingSystemTheme = false;
+		}
+	};
+
+	void checkSystemTheme();
+	systemThemeWatcherTimer = setInterval(() => void checkSystemTheme(), 2000);
+	systemThemeWatcherTimer.unref?.();
+}
+
+function stopSystemThemeWatcher(): void {
+	if (systemThemeWatcherTimer) {
+		clearInterval(systemThemeWatcherTimer);
+		systemThemeWatcherTimer = undefined;
+	}
+	isCheckingSystemTheme = false;
 }
 
 function startThemeWatcher(): void {
 	stopThemeWatcher();
 
+	if (followSystemTheme && isSystemThemeName(currentThemeName)) {
+		startSystemThemeWatcher();
+		return;
+	}
+
 	// Only watch if it's a custom theme (not built-in)
-	if (!currentThemeName || currentThemeName === "dark" || currentThemeName === "light") {
+	if (!currentThemeName) {
 		return;
 	}
 
@@ -850,9 +952,7 @@ function startThemeWatcher(): void {
 				registeredThemes.set(watchedThemeName, reloadedTheme);
 				setGlobalTheme(reloadedTheme);
 				// Notify callback (to invalidate UI)
-				if (onThemeChangeCallback) {
-					onThemeChangeCallback();
-				}
+				notifyThemeChanged("file");
 			} catch (_error) {
 				// Ignore errors (file might be in invalid state while being edited)
 			}
@@ -883,6 +983,7 @@ function startThemeWatcher(): void {
 }
 
 export function stopThemeWatcher(): void {
+	stopSystemThemeWatcher();
 	if (themeReloadTimer) {
 		clearTimeout(themeReloadTimer);
 		themeReloadTimer = undefined;
