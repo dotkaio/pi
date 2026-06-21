@@ -1,3 +1,4 @@
+import { spawnSync } from "child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { delimiter, join } from "path";
@@ -121,6 +122,23 @@ function createBunGlobalInstall(): { packageDir: string } {
 	return { packageDir };
 }
 
+function createSourceCheckout(): { root: string; packageDir: string } {
+	const root = mkdtempSync(join(tmpdir(), "pi-source-"));
+	const packageDir = join(root, "packages", "coding-agent");
+	const srcDir = join(packageDir, "src");
+	spawnSync("git", ["init", "-q"], { cwd: root, stdio: "ignore" });
+	mkdirSync(srcDir, { recursive: true });
+	writeFileSync(join(packageDir, "package.json"), "{}");
+	writeFileSync(join(srcDir, "cli.ts"), "#!/usr/bin/env node\n");
+	spawnSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+	spawnSync("git", ["commit", "-q", "-m", "init"], { cwd: root, stdio: "ignore" });
+	tempDir = root;
+	process.env.PI_PACKAGE_DIR = packageDir;
+	process.argv[1] = join(srcDir, "cli.ts");
+	setExecPath("/usr/local/bin/node");
+	return { root, packageDir };
+}
+
 function createFakePnpmScript(root: string): string {
 	if (process.platform === "win32") {
 		return `@echo off\r\nif "%1"=="root" if "%2"=="-g" echo ${root}\r\n`;
@@ -165,6 +183,31 @@ describe("detectInstallMethod", () => {
 		expect(getUpdateInstruction("@earendil-works/pi-coding-agent")).toBe(
 			"Update @earendil-works/pi-coding-agent using the package manager, wrapper, or source checkout that provides this installation.",
 		);
+	});
+
+	test("self-updates source checkouts", () => {
+		const { root } = createSourceCheckout();
+
+		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
+
+		expect(detectInstallMethod()).toBe("source");
+		expect(command).toEqual({
+			command: "git",
+			args: ["-C", root, "pull", "--ff-only"],
+			display: `git -C ${root} pull --ff-only && npm --prefix ${root} install --ignore-scripts`,
+			steps: [
+				{
+					command: "git",
+					args: ["-C", root, "pull", "--ff-only"],
+					display: `git -C ${root} pull --ff-only`,
+				},
+				{
+					command: "npm",
+					args: ["--prefix", root, "install", "--ignore-scripts"],
+					display: `npm --prefix ${root} install --ignore-scripts`,
+				},
+			],
+		});
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {

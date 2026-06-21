@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed `openai-completions` provider to pass through `model.maxTokens` when `options.maxTokens` is not explicitly set (fixes models like DeepSeek V4 Pro / Kimi K2.7 Code that have low server defaults) ([#5595](https://github.com/earendil-works/pi/issues/5595)).
 - Fixed GitHub Copilot OAuth model availability to use the authenticated account's model picker catalog ([#5897](https://github.com/earendil-works/pi/issues/5897)).
 
 ## [0.79.8] - 2026-06-19

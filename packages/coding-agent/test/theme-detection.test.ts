@@ -1,17 +1,77 @@
-import { type RgbColor, resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
-import { afterEach, describe, expect, it } from "vitest";
 import {
+	type RgbColor,
+	resetCapabilitiesCache,
+	setCapabilities,
+	type TerminalColorScheme,
+	type TUI,
+} from "@earendil-works/pi-tui";
+import { afterEach, describe, expect, it } from "vitest";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import {
+	DEFAULT_AUTOMATIC_THEME_SETTING,
 	detectTerminalBackgroundFromEnv,
 	detectTerminalBackgroundTheme,
+	getCurrentThemeName,
+	getEffectiveAutoThemeSetting,
 	getThemeByName,
 	getThemeForRgbColor,
 	parseAutoThemeSetting,
 	resolveThemeSetting,
+	stopThemeWatcher,
 } from "../src/modes/interactive/theme/theme.ts";
+import { InteractiveThemeController } from "../src/modes/interactive/theme/theme-controller.ts";
 
 afterEach(() => {
 	resetCapabilitiesCache();
+	stopThemeWatcher();
 });
+
+class ThemeControllerTestUi {
+	private readonly colorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
+	readonly notificationStates: boolean[] = [];
+	invalidateCount = 0;
+	renderCount = 0;
+	colorScheme: TerminalColorScheme;
+
+	constructor(colorScheme: TerminalColorScheme) {
+		this.colorScheme = colorScheme;
+	}
+
+	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void {
+		this.colorSchemeListeners.add(listener);
+		return () => this.colorSchemeListeners.delete(listener);
+	}
+
+	setTerminalColorSchemeNotifications(enabled: boolean): void {
+		this.notificationStates.push(enabled);
+	}
+
+	async queryTerminalColorScheme(): Promise<TerminalColorScheme | undefined> {
+		return this.colorScheme;
+	}
+
+	async queryTerminalBackgroundColor(): Promise<RgbColor | undefined> {
+		return undefined;
+	}
+
+	invalidate(): void {
+		this.invalidateCount += 1;
+	}
+
+	requestRender(): void {
+		this.renderCount += 1;
+	}
+
+	emitColorScheme(scheme: TerminalColorScheme): void {
+		for (const listener of this.colorSchemeListeners) {
+			listener(scheme);
+		}
+	}
+
+	asTui(): TUI {
+		return this as unknown as TUI;
+	}
+}
 
 describe("detectTerminalBackgroundFromEnv", () => {
 	it("uses the COLORFGBG background color index", () => {
@@ -124,10 +184,39 @@ describe("theme detection from RGB", () => {
 
 describe("theme setting helpers", () => {
 	it("parses and resolves automatic theme settings", () => {
+		expect(DEFAULT_AUTOMATIC_THEME_SETTING).toBe("light/dark");
 		expect(parseAutoThemeSetting("light/dark")).toEqual({ lightTheme: "light", darkTheme: "dark" });
+		expect(getEffectiveAutoThemeSetting(undefined)).toEqual({ lightTheme: "light", darkTheme: "dark" });
 		expect(resolveThemeSetting("dark", "light")).toBe("dark");
 		expect(resolveThemeSetting("light/dark", "light")).toBe("light");
 		expect(resolveThemeSetting("light/dark", "dark")).toBe("dark");
 		expect(resolveThemeSetting("light/dark/extra", "dark")).toBeUndefined();
+	});
+});
+
+describe("InteractiveThemeController", () => {
+	it("uses automatic light/dark sync when the theme setting is unset", async () => {
+		const ui = new ThemeControllerTestUi("dark");
+		const settingsManager = SettingsManager.inMemory({});
+		const errors: string[] = [];
+		const controller = new InteractiveThemeController(
+			ui.asTui(),
+			settingsManager,
+			(message) => errors.push(message),
+			() => undefined,
+		);
+
+		await controller.applyFromSettings();
+
+		expect(ui.notificationStates).toEqual([true]);
+		expect(settingsManager.getThemeSetting()).toBeUndefined();
+		expect(getCurrentThemeName()).toBe("dark");
+
+		ui.emitColorScheme("light");
+
+		expect(controller.getTerminalTheme()).toBe("light");
+		expect(getCurrentThemeName()).toBe("light");
+		expect(settingsManager.getThemeSetting()).toBeUndefined();
+		expect(errors).toEqual([]);
 	});
 });

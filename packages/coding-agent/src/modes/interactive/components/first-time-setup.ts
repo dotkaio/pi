@@ -1,22 +1,23 @@
 import { Container, getKeybindings, Spacer, Text } from "@earendil-works/pi-tui";
 import { APP_NAME } from "../../../config.ts";
-import { type TerminalTheme, theme } from "../theme/theme.ts";
+import { DEFAULT_AUTOMATIC_THEME_SETTING, type TerminalTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
 
 export interface FirstTimeSetupResult {
-	theme: TerminalTheme;
+	theme: string;
 	shareAnalytics: boolean;
 }
 
 export interface FirstTimeSetupOptions {
 	detectedTheme: TerminalTheme;
-	onThemePreview: (themeName: TerminalTheme) => void;
+	onThemePreview: (themeSetting: string) => void;
 	onSubmit: (result: FirstTimeSetupResult) => void;
 	onCancel: () => void;
 }
 
-const THEME_OPTIONS: Array<{ value: TerminalTheme; label: string }> = [
+const THEME_OPTIONS: Array<{ value: string; label: string }> = [
+	{ value: DEFAULT_AUTOMATIC_THEME_SETTING, label: "System" },
 	{ value: "dark", label: "Dark" },
 	{ value: "light", label: "Light" },
 ];
@@ -40,7 +41,7 @@ export class FirstTimeSetupComponent extends Container {
 		this.options = options;
 		this.themeIndex = Math.max(
 			0,
-			THEME_OPTIONS.findIndex((option) => option.value === options.detectedTheme),
+			THEME_OPTIONS.findIndex((option) => option.value === DEFAULT_AUTOMATIC_THEME_SETTING),
 		);
 		this.update();
 	}

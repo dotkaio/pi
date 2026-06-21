@@ -128,10 +128,12 @@ import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { getModelSearchText } from "./model-search.ts";
 import {
+	DEFAULT_AUTOMATIC_THEME_SETTING,
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
 	getCurrentThemeName,
 	getEditorTheme,
+	getEffectiveAutoThemeSetting,
 	getMarkdownTheme,
 	getThemeByName,
 	onThemeChange,
@@ -729,7 +731,13 @@ export class InteractiveMode {
 
 		// Set up theme file watcher
 		onThemeChange((themeName, source) => {
-			if (source === "system" && this.settingsManager.getTheme() !== themeName) {
+			const themeSetting = this.settingsManager.getThemeSetting();
+			if (
+				source === "system" &&
+				themeSetting !== undefined &&
+				!getEffectiveAutoThemeSetting(themeSetting) &&
+				this.settingsManager.getTheme() !== themeName
+			) {
 				this.settingsManager.setTheme(themeName);
 				void this.settingsManager.flush();
 			}
@@ -737,8 +745,11 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 			this.ui.requestRender();
 		});
+		const themeSetting = this.settingsManager.getThemeSetting();
 		const currentThemeName = getCurrentThemeName();
 		if (
+			themeSetting !== undefined &&
+			!getEffectiveAutoThemeSetting(themeSetting) &&
 			(currentThemeName === "dark" || currentThemeName === "light") &&
 			this.settingsManager.getTheme() !== currentThemeName
 		) {
@@ -3987,7 +3998,7 @@ export class InteractiveMode {
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
-					currentTheme: this.settingsManager.getThemeSetting() || "dark",
+					currentTheme: this.settingsManager.getThemeSetting() || DEFAULT_AUTOMATIC_THEME_SETTING,
 					terminalTheme: this.themeController.getTerminalTheme(),
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,

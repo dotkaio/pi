@@ -10,7 +10,12 @@ import {
 	FirstTimeSetupComponent,
 	type FirstTimeSetupResult,
 } from "../modes/interactive/components/first-time-setup.ts";
-import { detectTerminalBackgroundTheme, initTheme, setTheme } from "../modes/interactive/theme/theme.ts";
+import {
+	detectTerminalBackgroundTheme,
+	initTheme,
+	resolveThemeSetting,
+	setTheme,
+} from "../modes/interactive/theme/theme.ts";
 
 const OFFICIAL_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const OFFICIAL_APP_NAME = "pi";
@@ -126,13 +131,14 @@ export async function showFirstTimeSetup(settingsManager: SettingsManager): Prom
 		const showSetup = async () => {
 			ui.start();
 			const detection = await detectTerminalBackgroundTheme({ ui, timeoutMs: 100 });
-			setTheme(detection.theme);
+			const previewTheme = (themeSetting: string) => {
+				setTheme(resolveThemeSetting(themeSetting, detection.theme) ?? detection.theme);
+				ui.requestRender();
+			};
+			previewTheme(detection.theme);
 			const component = new FirstTimeSetupComponent({
 				detectedTheme: detection.theme,
-				onThemePreview: (themeName) => {
-					setTheme(themeName);
-					ui.requestRender();
-				},
+				onThemePreview: previewTheme,
 				onSubmit: (result) => void finish(result),
 				onCancel: () => void finish(undefined),
 			});

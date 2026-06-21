@@ -2227,6 +2227,39 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
+		it("limits autocomplete to remaining terminal rows after the editor", async () => {
+			const terminalRows = 12;
+			const terminal = new VirtualTerminal(80, terminalRows);
+			const editor = new Editor(new TUI(terminal), defaultEditorTheme, { autocompleteMaxVisible: 5 });
+			const items = Array.from({ length: 30 }, (_, index) => {
+				const label = `item-${index}`;
+				return { value: label, label };
+			});
+
+			const mockProvider: AutocompleteProvider = {
+				getSuggestions: async (_lines, _cursorLine, _cursorCol, options) => {
+					return options.force ? { items, prefix: "" } : null;
+				},
+				applyCompletion,
+			};
+
+			editor.setAutocompleteProvider(mockProvider);
+			editor.handleInput("\t");
+			await flushAutocomplete();
+
+			const rendered = editor.render(80).map((line) => stripVTControlCharacters(line));
+			const renderedItems = rendered.filter((line) => /item-\d+/.test(line));
+			assert.strictEqual(renderedItems.length, 7);
+			assert.ok(renderedItems.some((line) => line.includes("item-0")));
+			assert.ok(renderedItems.some((line) => line.includes("item-6")));
+			assert.ok(rendered.length <= terminalRows - 1);
+
+			terminal.resize(80, 6);
+			const resizedRendered = editor.render(80).map((line) => stripVTControlCharacters(line));
+			const resizedItems = resizedRendered.filter((line) => /item-\d+/.test(line));
+			assert.strictEqual(resizedItems.length, 1);
+		});
+
 		it("debounces @ autocomplete while typing", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let suggestionCalls = 0;

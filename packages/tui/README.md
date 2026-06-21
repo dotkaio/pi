@@ -304,6 +304,7 @@ interface EditorTheme {
 
 interface EditorOptions {
   paddingX?: number;  // Horizontal padding (default: 0)
+  autocompleteMaxVisible?: number;  // Deprecated; autocomplete uses terminal row count
 }
 
 const editor = new Editor(tui, theme, options?);  // tui is required for height-aware scrolling
@@ -320,6 +321,7 @@ editor.getPaddingX();  // Get current padding
 - Multi-line editing with word wrap
 - Slash command autocomplete (type `/`)
 - File path autocomplete (press `Tab`)
+- Autocomplete dropdown shows up to the current terminal row count
 - Large paste handling (>10 lines creates `[paste #1 +50 lines]` marker)
 - Horizontal lines above/below editor
 - Fake cursor rendering (hidden real cursor)

@@ -67,6 +67,10 @@ export class SelectList implements Component {
 		this.selectedIndex = Math.max(0, Math.min(index, this.filteredItems.length - 1));
 	}
 
+	setMaxVisible(maxVisible: number): void {
+		this.maxVisible = Math.max(1, Math.floor(maxVisible));
+	}
+
 	invalidate(): void {
 		// No cached state to invalidate currently
 	}

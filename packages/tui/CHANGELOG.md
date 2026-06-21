@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed editor autocomplete dropdowns to use the current terminal row count as the visible item limit, updating on resize while the menu is open.
+
 ## [0.79.8] - 2026-06-19
 
 ## [0.79.7] - 2026-06-18

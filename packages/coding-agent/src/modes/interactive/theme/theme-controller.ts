@@ -1,10 +1,11 @@
 import type { TUI } from "@earendil-works/pi-tui";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import {
+	DEFAULT_AUTOMATIC_THEME_SETTING,
 	detectTerminalBackgroundFromEnv,
 	detectTerminalBackgroundTheme,
+	getEffectiveAutoThemeSetting,
 	initTheme,
-	parseAutoThemeSetting,
 	resolveThemeSetting,
 	setTheme,
 	setThemeInstance,
@@ -28,14 +29,16 @@ export class InteractiveThemeController {
 		this.settingsManager = settingsManager;
 		this.showError = showError;
 		this.onChanged = onChanged;
-		this.activeThemeName = resolveThemeSetting(this.settingsManager.getThemeSetting(), this.terminalTheme);
+		this.activeThemeName =
+			resolveThemeSetting(this.settingsManager.getThemeSetting(), this.terminalTheme) ??
+			resolveThemeSetting(DEFAULT_AUTOMATIC_THEME_SETTING, this.terminalTheme);
 		initTheme(this.activeThemeName, true);
 		this.ui.onTerminalColorSchemeChange((terminalTheme) => this.applyTerminalTheme(terminalTheme));
 	}
 
 	async applyFromSettings(): Promise<void> {
 		const themeSetting = this.settingsManager.getThemeSetting();
-		const autoTheme = parseAutoThemeSetting(themeSetting);
+		const autoTheme = getEffectiveAutoThemeSetting(themeSetting);
 		if (autoTheme) {
 			this.terminalTheme = await this.detectTerminalThemeForAuto();
 			this.setAutoSync(true);
@@ -51,11 +54,7 @@ export class InteractiveThemeController {
 
 		const detection = await detectTerminalBackgroundTheme({ ui: this.ui, timeoutMs: 100 });
 		this.terminalTheme = detection.theme;
-		if (!this.applyThemeName(detection.theme).success) return;
-		if (detection.confidence === "high") {
-			this.settingsManager.setTheme(detection.theme);
-			await this.settingsManager.flush();
-		}
+		this.applyThemeName(detection.theme, true);
 	}
 
 	setThemeName(themeName: string, showError = false): ThemeResult {
@@ -122,7 +121,7 @@ export class InteractiveThemeController {
 	private applyTerminalTheme(terminalTheme: TerminalTheme): void {
 		if (!this.autoSyncEnabled) return;
 		this.terminalTheme = terminalTheme;
-		const autoTheme = parseAutoThemeSetting(this.settingsManager.getThemeSetting());
+		const autoTheme = getEffectiveAutoThemeSetting(this.settingsManager.getThemeSetting());
 		if (!autoTheme) {
 			this.setAutoSync(false);
 			return;

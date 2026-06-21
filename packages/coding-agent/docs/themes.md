@@ -37,7 +37,13 @@ Select a theme via `/settings` or in `settings.json`:
 }
 ```
 
-On first run, pi detects your terminal background and defaults to `dark` or `light`.
+Automatic light/dark mode follows terminal appearance changes. It is the default when `theme` is unset. To configure it explicitly, store light and dark theme names separated by `/`:
+
+```json
+{
+  "theme": "light/dark"
+}
+```
 
 ## Creating a Custom Theme
 

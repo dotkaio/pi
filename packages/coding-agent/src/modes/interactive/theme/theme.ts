@@ -636,9 +636,14 @@ export function getThemeByName(name: string): Theme | undefined {
 
 export type TerminalTheme = "dark" | "light";
 
-export function parseAutoThemeSetting(
-	themeSetting: string | undefined,
-): { lightTheme: string; darkTheme: string } | undefined {
+export const DEFAULT_AUTOMATIC_THEME_SETTING = "light/dark";
+
+export interface AutomaticThemeSetting {
+	lightTheme: string;
+	darkTheme: string;
+}
+
+export function parseAutoThemeSetting(themeSetting: string | undefined): AutomaticThemeSetting | undefined {
 	if (!themeSetting) return undefined;
 	const slashIndex = themeSetting.indexOf("/");
 	if (slashIndex === -1 || themeSetting.indexOf("/", slashIndex + 1) !== -1) {
@@ -651,6 +656,13 @@ export function parseAutoThemeSetting(
 		return undefined;
 	}
 	return { lightTheme, darkTheme };
+}
+
+export function getEffectiveAutoThemeSetting(themeSetting: string | undefined): AutomaticThemeSetting | undefined {
+	if (themeSetting === undefined) {
+		return parseAutoThemeSetting(DEFAULT_AUTOMATIC_THEME_SETTING);
+	}
+	return parseAutoThemeSetting(themeSetting);
 }
 
 export function resolveThemeSetting(
@@ -768,11 +780,6 @@ export async function detectTerminalBackgroundTheme({
 	timeoutMs,
 	env,
 }: TerminalBackgroundThemeDetectionOptions): Promise<TerminalThemeDetection> {
-	const systemAppearance = await detectSystemAppearanceTheme();
-	if (systemAppearance) {
-		return systemAppearance;
-	}
-
 	try {
 		const rgb = await ui.queryTerminalBackgroundColor({ timeoutMs });
 		if (rgb) {
@@ -784,10 +791,20 @@ export async function detectTerminalBackgroundTheme({
 			};
 		}
 	} catch {
-		// Fall back to environment-based detection when the terminal query fails.
+		// Fall back to system or environment-based detection when the terminal query fails.
 	}
 
-	return detectTerminalBackgroundFromEnv({ env });
+	const envDetection = detectTerminalBackgroundFromEnv({ env });
+	if (envDetection.confidence === "high") {
+		return envDetection;
+	}
+
+	const systemAppearance = await detectSystemAppearanceTheme();
+	if (systemAppearance) {
+		return systemAppearance;
+	}
+
+	return envDetection;
 }
 
 export function getDefaultTheme(): string {

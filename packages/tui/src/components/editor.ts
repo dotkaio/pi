@@ -575,8 +575,11 @@ export class Editor implements Component, Focusable {
 			result.push(horizontal.repeat(width));
 		}
 
-		// Add autocomplete list if active
+		// Add autocomplete list if active. Reserve room for the editor itself,
+		// SelectList's scroll counter, and the app/status row so the picker cannot
+		// push the input editor out of the visible viewport.
 		if (this.autocompleteState && this.autocompleteList) {
+			this.autocompleteList.setMaxVisible(this.getWindowRowsAutocompleteMaxVisible(result.length));
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
@@ -2085,12 +2088,18 @@ export class Editor implements Component, Focusable {
 		return firstPrefixIndex;
 	}
 
+	private getWindowRowsAutocompleteMaxVisible(rowsAlreadyRendered = 0): number {
+		const terminalRows = Math.max(1, Math.floor(this.tui.terminal.rows));
+		const reservedTrailingRows = 2; // SelectList scroll info plus the app/status row.
+		return Math.max(1, terminalRows - rowsAlreadyRendered - reservedTrailingRows);
+	}
+
 	private createAutocompleteList(
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
 		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
-		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		return new SelectList(items, this.getWindowRowsAutocompleteMaxVisible(), this.theme.selectList, layout);
 	}
 
 	private tryTriggerAutocomplete(explicitTab: boolean = false): void {

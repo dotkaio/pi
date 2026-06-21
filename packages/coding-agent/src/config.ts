@@ -26,7 +26,7 @@ export const isBunRuntime = !!process.versions.bun;
 // Install Method Detection
 // =============================================================================
 
-export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "source" | "unknown";
 
 interface SelfUpdateCommandStep {
 	command: string;
@@ -58,9 +58,54 @@ function makeSelfUpdateCommandStep(command: string, args: string[]): SelfUpdateC
 	};
 }
 
+function normalizePathForComparison(path: string): string {
+	const resolvedPath = resolve(path);
+	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
+}
+
+function pathContains(parent: string, child: string): boolean {
+	const normalizedParent = normalizePathForComparison(parent);
+	const normalizedChild = normalizePathForComparison(child);
+	const parentPrefix = normalizedParent.endsWith(sep) ? normalizedParent : `${normalizedParent}${sep}`;
+	return normalizedChild === normalizedParent || normalizedChild.startsWith(parentPrefix);
+}
+
+function getSourceCheckoutRoot(): string | undefined {
+	const packageDir = getPackageDir();
+	const entrypoint = process.argv[1];
+	if (!entrypoint || !pathContains(packageDir, entrypoint) || !existsSync(join(packageDir, "src", "cli.ts"))) {
+		return undefined;
+	}
+
+	let dir = packageDir;
+	while (dir !== dirname(dir)) {
+		if (existsSync(join(dir, ".git"))) {
+			return dir;
+		}
+		dir = dirname(dir);
+	}
+	return undefined;
+}
+
+function isSourceCheckoutClean(root: string): boolean {
+	const staged = spawnProcessSync("git", ["-C", root, "diff", "--cached", "--quiet", "--ignore-submodules"], {
+		encoding: "utf-8",
+		stdio: ["ignore", "ignore", "ignore"],
+	});
+	if (staged.status !== 0) return false;
+	const unstaged = spawnProcessSync("git", ["-C", root, "diff", "--quiet", "--ignore-submodules"], {
+		encoding: "utf-8",
+		stdio: ["ignore", "ignore", "ignore"],
+	});
+	return unstaged.status === 0;
+}
+
 export function detectInstallMethod(): InstallMethod {
 	if (isBunBinary) {
 		return "bun-binary";
+	}
+	if (getSourceCheckoutRoot()) {
+		return "source";
 	}
 
 	const resolvedPath = `${__dirname}\0${process.execPath || ""}`.toLowerCase().replace(/\\/g, "/");
@@ -109,6 +154,18 @@ function getSelfUpdateCommandForMethod(
 	switch (method) {
 		case "bun-binary":
 			return undefined;
+		case "source": {
+			const root = getSourceCheckoutRoot();
+			if (!root) return undefined;
+			if (!isSourceCheckoutClean(root)) return undefined;
+			const pullStep = makeSelfUpdateCommandStep("git", ["-C", root, "pull", "--ff-only"]);
+			const installStep = makeSelfUpdateCommandStep("npm", ["--prefix", root, "install", "--ignore-scripts"]);
+			return {
+				...pullStep,
+				display: `${pullStep.display} && ${installStep.display}`,
+				steps: [pullStep, installStep],
+			};
+		}
 		case "pnpm": {
 			const match = readCommandOutput("pnpm", ["root", "-g"])
 				? undefined
@@ -230,6 +287,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 			return roots;
 		}
 		case "bun-binary":
+		case "source":
 		case "unknown":
 			return [];
 	}
@@ -306,7 +364,13 @@ export function getSelfUpdateCommand(
 ): SelfUpdateCommand | undefined {
 	const method = detectInstallMethod();
 	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageName, npmCommand);
-	if (!command || !isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
+	if (!command) {
+		return undefined;
+	}
+	if (method === "source") {
+		return command;
+	}
+	if (!isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
 		return undefined;
 	}
 	return command;
@@ -323,10 +387,20 @@ export function getSelfUpdateUnavailableInstruction(
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageName, npmCommand);
 	if (command) {
+		if (method === "source") {
+			return `Update this source checkout with: ${command.display}`;
+		}
 		if (isManagedByGlobalPackageManager(method, packageName, npmCommand) && !isSelfUpdatePathWritable()) {
 			return `This installation is managed by a global ${method} install, but the install path is not writable. Update it yourself with: ${command.display}`;
 		}
 		return `This installation is not managed by a global ${method} install. Update it with the package manager, wrapper, or source checkout that provides it.`;
+	}
+	if (method === "source") {
+		const root = getSourceCheckoutRoot();
+		if (root && !isSourceCheckoutClean(root)) {
+			return "Working tree has uncommitted changes. Commit or stash them, then retry pi update.";
+		}
+		return "Update this source checkout with: git -C <root> pull --ff-only && npm --prefix <root> install --ignore-scripts";
 	}
 	return `Update ${updatePackageName} using the package manager, wrapper, or source checkout that provides this installation.`;
 }

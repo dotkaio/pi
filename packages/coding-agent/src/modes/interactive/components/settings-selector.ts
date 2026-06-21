@@ -15,6 +15,7 @@ import {
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import type { DefaultProjectTrust, WarningSettings } from "../../../core/settings-manager.ts";
 import {
+	DEFAULT_AUTOMATIC_THEME_SETTING,
 	getSelectListTheme,
 	getSettingsListTheme,
 	parseAutoThemeSetting,
@@ -222,7 +223,7 @@ function themeItems(availableThemes: string[]): SelectItem[] {
 	return availableThemes.map((name) => ({ value: name, label: name }));
 }
 
-const AUTOMATIC_THEME_VALUE = "/";
+const AUTOMATIC_THEME_VALUE = DEFAULT_AUTOMATIC_THEME_SETTING;
 
 function singleModeThemeItems(availableThemes: string[]): SelectItem[] {
 	return [
