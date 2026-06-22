@@ -396,10 +396,6 @@ export function getSelfUpdateUnavailableInstruction(
 		return `This installation is not managed by a global ${method} install. Update it with the package manager, wrapper, or source checkout that provides it.`;
 	}
 	if (method === "source") {
-		const root = getSourceCheckoutRoot();
-		if (root && !isSourceCheckoutClean(root)) {
-			return "Working tree has uncommitted changes. Commit or stash them, then retry pi update.";
-		}
 		return "Update this source checkout with: git -C <root> pull --ff-only && npm --prefix <root> install --ignore-scripts";
 	}
 	return `Update ${updatePackageName} using the package manager, wrapper, or source checkout that provides this installation.`;
