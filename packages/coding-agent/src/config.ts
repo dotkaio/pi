@@ -73,7 +73,13 @@ function pathContains(parent: string, child: string): boolean {
 function getSourceCheckoutRoot(): string | undefined {
 	const packageDir = getPackageDir();
 	const entrypoint = process.argv[1];
-	if (!entrypoint || !pathContains(packageDir, entrypoint) || !existsSync(join(packageDir, "src", "cli.ts"))) {
+	if (!entrypoint || !pathContains(packageDir, entrypoint)) {
+		return undefined;
+	}
+	// Accept source checkouts whether running via tsx (src/cli.ts) or built dist (dist/cli.js)
+	const hasSrcCli = existsSync(join(packageDir, "src", "cli.ts"));
+	const hasDistCli = existsSync(join(packageDir, "dist", "cli.js"));
+	if (!hasSrcCli && !hasDistCli) {
 		return undefined;
 	}
 
