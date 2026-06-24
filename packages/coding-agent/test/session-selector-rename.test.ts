@@ -27,6 +27,7 @@ function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionI
 
 // Kitty keyboard protocol encoding for Ctrl+R
 const CTRL_R = "\x1b[114;5u";
+const CTRL_SHIFT_R = "\x1b[114;6u";
 
 describe("session selector rename", () => {
 	beforeAll(() => {
@@ -76,9 +77,9 @@ describe("session selector rename", () => {
 		expect(output).not.toContain("rename");
 	});
 
-	it("enters rename mode on Ctrl+R and submits with Enter", async () => {
-		const sessions = [makeSession({ id: "a", name: "Old" })];
-		const renameSession = vi.fn(async () => {});
+	it("auto-renames selected session on Ctrl+R and updates the picker", async () => {
+		const sessions = [makeSession({ id: "a", firstMessage: "old generated title source" })];
+		const renameSession = vi.fn(async () => "Semantic Title Here");
 
 		const keybindings = new KeybindingsManager();
 		const selector = new SessionSelectorComponent(
@@ -95,17 +96,38 @@ describe("session selector rename", () => {
 		selector.getSessionList().handleInput(CTRL_R);
 		await flushPromises();
 
-		// Rename mode layout
+		expect(renameSession).toHaveBeenCalledTimes(1);
+		expect(renameSession).toHaveBeenCalledWith(sessions[0]);
 		const output = selector.render(120).join("\n");
-		expect(output).toContain("Rename Session");
-		expect(output).not.toContain("Resume Session");
+		expect(output).toContain("Semantic Title Here");
+		expect(output).not.toContain("old generated title source");
+	});
 
-		// Type and submit
-		selector.handleInput("X");
-		selector.handleInput("\r");
+	it("bulk-renames only unnamed sessions on Ctrl+Shift+R", async () => {
+		const unnamedSessions = [makeSession({ id: "a" }), makeSession({ id: "b" })];
+		const sessions = [...unnamedSessions, makeSession({ id: "c", name: "Already Named" })];
+		const renameAllSessions = vi.fn(async () => ({ renamed: unnamedSessions.length, failed: 0 }));
+
+		const keybindings = new KeybindingsManager();
+		const selector = new SessionSelectorComponent(
+			async () => sessions,
+			async () => sessions,
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{ renameAllSessions, showRenameHint: true, keybindings },
+		);
 		await flushPromises();
 
-		expect(renameSession).toHaveBeenCalledTimes(1);
-		expect(renameSession).toHaveBeenCalledWith(sessions[0]!.path, "XOld");
+		const output = selector.render(160).join("\n");
+		expect(output).toContain("shift+ctrl+r");
+		expect(output).toContain("rename all");
+
+		selector.getSessionList().handleInput(CTRL_SHIFT_R);
+		await flushPromises();
+
+		expect(renameAllSessions).toHaveBeenCalledTimes(1);
+		expect(renameAllSessions).toHaveBeenCalledWith(unnamedSessions);
 	});
 });

@@ -10,12 +10,14 @@ import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
+	completeSimple,
 	getProviders,
 	type ImageContent,
 	type Message,
 	type Model,
 	type OAuthProviderId,
 	type OAuthSelectPrompt,
+	type TextContent,
 } from "@earendil-works/pi-ai/compat";
 import type {
 	AutocompleteItem,
@@ -82,7 +84,7 @@ import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import { loadEntriesFromFile, type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -4544,6 +4546,174 @@ export class InteractiveMode {
 		});
 	}
 
+	private getSessionTitleTranscript(sessionPath: string): string {
+		const entries = loadEntriesFromFile(sessionPath);
+		const lines: string[] = [];
+
+		for (const entry of entries) {
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			if (message.role !== "user" && message.role !== "assistant") continue;
+
+			const text = this.getMessageTextForTitle(message);
+			if (!text) continue;
+
+			const role = message.role === "user" ? "User" : "Assistant";
+			lines.push(`${role}: ${text}`);
+			if (lines.length >= 6) break;
+		}
+
+		return lines.join("\n\n").slice(0, 4000);
+	}
+
+	private getMessageTextForTitle(message: Message): string {
+		const textParts =
+			typeof message.content === "string"
+				? [message.content]
+				: message.content
+						.filter((content): content is TextContent => content.type === "text")
+						.map((content) => content.text);
+
+		return textParts
+			.join(" ")
+			.replace(/[\x00-\x1f\x7f]+/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+	}
+
+	private normalizeGeneratedSessionTitle(rawTitle: string): string | undefined {
+		const title = rawTitle
+			.split("\n")[0]
+			?.replace(/^title\s*[:-]\s*/i, "")
+			.replace(/^[`"'“”‘’]+|[`"'“”‘’.]+$/g, "")
+			.replace(/\s+/g, " ")
+			.trim();
+
+		if (!title) return undefined;
+
+		const vagueTitles = new Set([
+			"chat session",
+			"code session",
+			"coding session",
+			"general discussion",
+			"project discussion",
+			"session summary",
+			"task discussion",
+		]);
+		if (vagueTitles.has(title.toLowerCase())) return undefined;
+
+		const words = title.split(/\s+/);
+		if (words.length < 3) return undefined;
+		return words.slice(0, 5).join(" ");
+	}
+
+	private getFallbackSessionTitle(session: { cwd: string; firstMessage: string }): string {
+		const source = session.firstMessage !== "(no messages)" ? session.firstMessage : path.basename(session.cwd);
+		const cleaned = source
+			.replace(/https?:\/\/\S+/g, " ")
+			.replace(/[`*_#>[\](){}]/g, " ")
+			.replace(/[\x00-\x1f\x7f]+/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		const stopWords = new Set([
+			"a",
+			"about",
+			"and",
+			"are",
+			"can",
+			"could",
+			"for",
+			"from",
+			"how",
+			"i",
+			"it",
+			"me",
+			"of",
+			"on",
+			"please",
+			"that",
+			"the",
+			"this",
+			"to",
+			"use",
+			"with",
+			"you",
+		]);
+		const words = cleaned
+			.split(/\s+/)
+			.filter((word) => word.length > 2 && !stopWords.has(word.toLowerCase()))
+			.slice(0, 5);
+		return words.length >= 3 ? words.join(" ") : "Untitled Session";
+	}
+
+	private async generateSemanticSessionTitle(session: {
+		path: string;
+		cwd: string;
+		firstMessage: string;
+	}): Promise<string> {
+		const model = this.session.model;
+		if (!model) return this.getFallbackSessionTitle(session);
+
+		const auth = await this.session.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) return this.getFallbackSessionTitle(session);
+
+		const transcript = this.getSessionTitleTranscript(session.path);
+		if (!transcript) return this.getFallbackSessionTitle(session);
+
+		const context = {
+			systemPrompt:
+				"You generate concise, specific chat session titles. Return only one title. Use 3-5 words. Avoid generic words like session, chat, discussion, task, work, help, or project unless they are essential.",
+			messages: [
+				{
+					role: "user" as const,
+					content: [
+						{
+							type: "text" as const,
+							text: `Working directory: ${session.cwd || "unknown"}\n\nConversation excerpt:\n${transcript}\n\nCreate a representative 3-5 word title for this session.`,
+						},
+					],
+					timestamp: Date.now(),
+				},
+			],
+		};
+		const response = await completeSimple(model, context, {
+			apiKey: auth.apiKey,
+			headers: auth.headers,
+			env: auth.env,
+			maxTokens: 24,
+		});
+
+		if (response.stopReason === "error" || response.stopReason === "aborted") {
+			return this.getFallbackSessionTitle(session);
+		}
+
+		const rawTitle = response.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map((content) => content.text)
+			.join(" ");
+		return this.normalizeGeneratedSessionTitle(rawTitle) ?? this.getFallbackSessionTitle(session);
+	}
+
+	private async renameAllSessionsWithSemanticTitles(
+		sessions: Array<{ path: string; cwd: string; firstMessage: string }>,
+	): Promise<{ renamed: number; failed: number }> {
+		let renamed = 0;
+		let failed = 0;
+
+		for (const session of sessions) {
+			try {
+				const title = await this.generateSemanticSessionTitle(session);
+				const manager = SessionManager.open(session.path);
+				manager.appendSessionInfo(title);
+				renamed++;
+			} catch {
+				failed++;
+			}
+		}
+
+		return { renamed, failed };
+	}
+
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
@@ -4566,12 +4736,13 @@ export class InteractiveMode {
 				},
 				() => this.ui.requestRender(),
 				{
-					renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
-						const next = (nextName ?? "").trim();
-						if (!next) return;
-						const mgr = SessionManager.open(sessionFilePath);
-						mgr.appendSessionInfo(next);
+					renameSession: async (sessionInfo) => {
+						const title = await this.generateSemanticSessionTitle(sessionInfo);
+						const mgr = SessionManager.open(sessionInfo.path);
+						mgr.appendSessionInfo(title);
+						return title;
 					},
+					renameAllSessions: (sessions) => this.renameAllSessionsWithSemanticTitles(sessions),
 					showRenameHint: true,
 					keybindings: this.keybindings,
 				},

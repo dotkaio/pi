@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a configurable `Ctrl+Shift+R` bulk rename action to the `/resume` session picker that generates semantic 3-5 word titles.
+
+### Fixed
+
+- Fixed source-checkout `pi update` to fetch and rebase with autostash before reinstalling and rebuilding, preserving local tweaks across upstream updates.
+
 ## [0.80.2] - 2026-06-23
 
 ### Changed

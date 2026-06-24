@@ -26,7 +26,7 @@ export const isBunRuntime = !!process.versions.bun;
 // Install Method Detection
 // =============================================================================
 
-export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "source" | "unknown";
 
 interface SelfUpdateCommandStep {
 	command: string;
@@ -90,6 +90,19 @@ export function detectInstallMethod(): InstallMethod {
 		return "npm";
 	}
 
+	// Detect source checkout (git repo)
+	const entrypointDir = getEntrypointPackageDir();
+	const packageDir = getPackageDir();
+	for (const dir of [entrypointDir, packageDir].filter((d): d is string => !!d)) {
+		let current = dir;
+		while (current !== dirname(current)) {
+			if (existsSync(join(current, ".git"))) {
+				return "source";
+			}
+			current = dirname(current);
+		}
+	}
+
 	return "unknown";
 }
 
@@ -122,6 +135,8 @@ function getSelfUpdateCommandForMethod(
 	switch (method) {
 		case "bun-binary":
 			return undefined;
+		case "source":
+			return getSourceSelfUpdateCommand();
 		case "pnpm": {
 			const match = readCommandOutput("pnpm", ["root", "-g"])
 				? undefined
@@ -186,6 +201,68 @@ function getSelfUpdateCommandForMethod(
 	}
 }
 
+function getSourceSelfUpdateCommand(): SelfUpdateCommand | undefined {
+	const gitRoot = getGitRoot();
+	if (!gitRoot) return undefined;
+
+	const remote = getSourceUpdateRemote(gitRoot);
+	if (!remote) return undefined;
+
+	const branch = getSourceUpdateBranch(gitRoot, remote);
+	const steps: SelfUpdateCommandStep[] = [
+		makeSelfUpdateCommandStep("git", ["-C", gitRoot, "fetch", remote, "--tags", "--prune"]),
+		makeSelfUpdateCommandStep("git", ["-C", gitRoot, "rebase", "--autostash", `${remote}/${branch}`]),
+		makeSelfUpdateCommandStep("npm", ["install", "--ignore-scripts"]),
+		makeSelfUpdateCommandStep("npm", ["run", "build"]),
+	];
+	return {
+		command: steps[0].command,
+		args: steps[0].args,
+		display: steps.map((step) => step.display).join(" && "),
+		steps,
+	};
+}
+
+function getSourceUpdateRemote(gitRoot: string): string | undefined {
+	const remotes = readCommandOutput("git", ["-C", gitRoot, "remote"])
+		?.split(/\r?\n/)
+		.map((remote) => remote.trim())
+		.filter((remote) => remote.length > 0);
+	if (!remotes || remotes.length === 0) return undefined;
+	if (remotes.includes("upstream")) return "upstream";
+
+	const upstream = readCommandOutput("git", [
+		"-C",
+		gitRoot,
+		"rev-parse",
+		"--abbrev-ref",
+		"--symbolic-full-name",
+		"@{upstream}",
+	]);
+	const upstreamRemote = upstream?.split("/")[0]?.trim();
+	if (upstreamRemote && remotes.includes(upstreamRemote)) return upstreamRemote;
+	if (remotes.includes("origin")) return "origin";
+	return remotes[0];
+}
+
+function getSourceUpdateBranch(gitRoot: string, remote: string): string {
+	const remoteHead = readCommandOutput("git", [
+		"-C",
+		gitRoot,
+		"symbolic-ref",
+		"--short",
+		`refs/remotes/${remote}/HEAD`,
+	]);
+	const remotePrefix = `${remote}/`;
+	if (remoteHead?.startsWith(remotePrefix)) {
+		const branch = remoteHead.slice(remotePrefix.length).trim();
+		if (branch) return branch;
+	}
+
+	const currentBranch = readCommandOutput("git", ["-C", gitRoot, "branch", "--show-current"]);
+	return currentBranch?.trim() || "main";
+}
+
 function readCommandOutput(
 	command: string,
 	args: string[],
@@ -243,6 +320,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 			return roots;
 		}
 		case "bun-binary":
+		case "source":
 		case "unknown":
 			return [];
 	}
@@ -290,6 +368,19 @@ function getEntrypointPackageDir(): string | undefined {
 	return undefined;
 }
 
+function getGitRoot(): string | undefined {
+	const entrypointDir = getEntrypointPackageDir();
+	if (!entrypointDir) return undefined;
+	let current = entrypointDir;
+	while (current !== dirname(current)) {
+		if (existsSync(join(current, ".git"))) {
+			return current;
+		}
+		current = dirname(current);
+	}
+	return undefined;
+}
+
 function isSelfUpdatePathWritable(): boolean {
 	const packageDir = getPackageDir();
 	try {
@@ -319,7 +410,13 @@ export function getSelfUpdateCommand(
 ): SelfUpdateCommand | undefined {
 	const method = detectInstallMethod();
 	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageTarget, npmCommand);
-	if (!command || !isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
+	if (!command) {
+		return undefined;
+	}
+	if (method === "source") {
+		return isSelfUpdatePathWritable() ? command : undefined;
+	}
+	if (!isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
 		return undefined;
 	}
 	return command;
@@ -337,6 +434,12 @@ export function getSelfUpdateUnavailableInstruction(
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, target, npmCommand);
 	if (command) {
+		if (method === "source") {
+			if (!isSelfUpdatePathWritable()) {
+				return `This source checkout is not writable. Update it yourself with: ${command.display}`;
+			}
+			return `Update the source checkout with: ${command.display}`;
+		}
 		if (isManagedByGlobalPackageManager(method, packageName, npmCommand) && !isSelfUpdatePathWritable()) {
 			return `This installation is managed by a global ${method} install, but the install path is not writable. Update it yourself with: ${command.display}`;
 		}

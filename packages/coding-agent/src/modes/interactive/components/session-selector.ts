@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import * as os from "node:os";
+import { basename } from "node:path";
 import {
 	type Component,
 	Container,
@@ -9,12 +10,11 @@ import {
 	getKeybindings,
 	Input,
 	Spacer,
-	Text,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
-import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.ts";
+import { type SessionInfo, type SessionListProgress, SessionManager } from "../../../core/session-manager.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -22,6 +22,45 @@ import { keyHint, keyText } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
+
+type RenameAllSessionsResult = {
+	renamed: number;
+	failed: number;
+};
+
+const GENERATED_SESSION_NAME_MAX_LENGTH = 60;
+
+function normalizeGeneratedSessionName(text: string): string {
+	const normalized = text
+		.replace(/[\x00-\x1f\x7f]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (normalized.length <= GENERATED_SESSION_NAME_MAX_LENGTH) return normalized;
+	return `${normalized.slice(0, GENERATED_SESSION_NAME_MAX_LENGTH - 3).trimEnd()}...`;
+}
+
+function getGeneratedSessionName(session: SessionInfo): string {
+	const contentName = normalizeGeneratedSessionName(session.name ?? session.firstMessage);
+	if (contentName && contentName !== "(no messages)") return contentName;
+	return normalizeGeneratedSessionName(basename(session.cwd || session.path)) || "Untitled session";
+}
+
+async function renameAllSessionsWithGeneratedNames(sessions: SessionInfo[]): Promise<RenameAllSessionsResult> {
+	let renamed = 0;
+	let failed = 0;
+
+	for (const session of sessions) {
+		try {
+			const manager = SessionManager.open(session.path);
+			manager.appendSessionInfo(getGeneratedSessionName(session));
+			renamed++;
+		} catch {
+			failed++;
+		}
+	}
+
+	return { renamed, failed };
+}
 
 function shortenPath(path: string): string {
 	const home = os.homedir();
@@ -65,6 +104,7 @@ class SessionSelectorHeader implements Component {
 	private statusMessage: { type: "info" | "error"; message: string } | null = null;
 	private statusTimeout: ReturnType<typeof setTimeout> | null = null;
 	private showRenameHint = false;
+	private showRenameAllHint = false;
 
 	constructor(scope: SessionScope, sortMode: SortMode, nameFilter: NameFilter, requestRender: () => void) {
 		this.scope = scope;
@@ -101,6 +141,10 @@ class SessionSelectorHeader implements Component {
 
 	setShowRenameHint(show: boolean): void {
 		this.showRenameHint = show;
+	}
+
+	setShowRenameAllHint(show: boolean): void {
+		this.showRenameAllHint = show;
 	}
 
 	setConfirmingDeletePath(path: string | null): void {
@@ -176,6 +220,9 @@ class SessionSelectorHeader implements Component {
 			];
 			if (this.showRenameHint) {
 				hint2Parts.push(keyHint("app.session.rename", "rename"));
+			}
+			if (this.showRenameAllHint) {
+				hint2Parts.push(keyHint("app.session.renameAll", "rename all"));
 			}
 			const hint2 = hint2Parts.join(sep);
 			hintLine1 = truncateToWidth(hint1, width, "…");
@@ -305,7 +352,8 @@ class SessionList implements Component, Focusable {
 	public onTogglePath?: (showPath: boolean) => void;
 	public onDeleteConfirmationChange?: (path: string | null) => void;
 	public onDeleteSession?: (sessionPath: string) => Promise<void>;
-	public onRenameSession?: (sessionPath: string) => void;
+	public onRenameSession?: (session: SessionInfo) => void;
+	public onRenameAllSessions?: () => void;
 	public onError?: (message: string) => void;
 	private maxVisible: number = 10; // Max sessions visible (one line each)
 
@@ -582,8 +630,14 @@ class SessionList implements Component, Focusable {
 		if (kb.matches(keyData, "app.session.rename")) {
 			const selected = this.filteredSessions[this.selectedIndex];
 			if (selected) {
-				this.onRenameSession?.(selected.session.path);
+				this.onRenameSession?.(selected.session);
 			}
+			return;
+		}
+
+		// Bulk-generate session names
+		if (kb.matches(keyData, "app.session.renameAll")) {
+			this.onRenameAllSessions?.();
 			return;
 		}
 
@@ -684,16 +738,6 @@ async function deleteSessionFile(
  */
 export class SessionSelectorComponent extends Container implements Focusable {
 	handleInput(data: string): void {
-		if (this.mode === "rename") {
-			const kb = getKeybindings();
-			if (kb.matches(data, "tui.select.cancel")) {
-				this.exitRenameMode();
-				return;
-			}
-			this.renameInput.handleInput(data);
-			return;
-		}
-
 		this.sessionList.handleInput(data);
 	}
 
@@ -709,14 +753,13 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	private currentSessionsLoader: SessionsLoader;
 	private allSessionsLoader: SessionsLoader;
 	private requestRender: () => void;
-	private renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
+	private renameSession?: (session: SessionInfo) => Promise<string | undefined>;
+	private renameAllSessions: (sessions: SessionInfo[]) => Promise<RenameAllSessionsResult>;
 	private currentLoading = false;
 	private allLoading = false;
 	private allLoadSeq = 0;
-
-	private mode: "list" | "rename" = "list";
-	private renameInput = new Input();
-	private renameTargetPath: string | null = null;
+	private bulkRenaming = false;
+	private selectedRenaming = false;
 
 	// Focusable implementation - propagate to sessionList for IME cursor positioning
 	private _focused = false;
@@ -726,10 +769,6 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	set focused(value: boolean) {
 		this._focused = value;
 		this.sessionList.focused = value;
-		this.renameInput.focused = value;
-		if (value && this.mode === "rename") {
-			this.renameInput.focused = true;
-		}
 	}
 
 	private buildBaseLayout(content: Component, options?: { showHeader?: boolean }): void {
@@ -754,7 +793,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		onExit: () => void,
 		requestRender: () => void,
 		options?: {
-			renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
+			renameSession?: (session: SessionInfo) => Promise<string | undefined>;
+			renameAllSessions?: (sessions: SessionInfo[]) => Promise<RenameAllSessionsResult>;
 			showRenameHint?: boolean;
 			keybindings?: KeybindingsManager;
 		},
@@ -768,8 +808,10 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		this.header = new SessionSelectorHeader(this.scope, this.sortMode, this.nameFilter, this.requestRender);
 		const renameSession = options?.renameSession;
 		this.renameSession = renameSession;
+		this.renameAllSessions = options?.renameAllSessions ?? renameAllSessionsWithGeneratedNames;
 		this.canRename = !!renameSession;
 		this.header.setShowRenameHint(options?.showRenameHint ?? this.canRename);
+		this.header.setShowRenameAllHint(options?.showRenameHint ?? this.canRename);
 
 		// Create session list (starts empty, will be populated after load)
 		this.sessionList = new SessionList(
@@ -782,10 +824,6 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		);
 
 		this.buildBaseLayout(this.sessionList);
-
-		this.renameInput.onSubmit = (value) => {
-			void this.confirmRename(value);
-		};
 
 		// Ensure header status timeouts are cleared when leaving the selector
 		const clearStatusMessage = () => this.header.setStatusMessage(null);
@@ -804,14 +842,12 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		this.sessionList.onToggleScope = () => this.toggleScope();
 		this.sessionList.onToggleSort = () => this.toggleSortMode();
 		this.sessionList.onToggleNameFilter = () => this.toggleNameFilter();
-		this.sessionList.onRenameSession = (sessionPath) => {
+		this.sessionList.onRenameAllSessions = () => {
+			void this.handleRenameAllSessions();
+		};
+		this.sessionList.onRenameSession = (session) => {
 			if (!renameSession) return;
-			if (this.scope === "current" && this.currentLoading) return;
-			if (this.scope === "all" && this.allLoading) return;
-
-			const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
-			const session = sessions.find((s) => s.path === sessionPath);
-			this.enterRenameMode(sessionPath, session?.name);
+			void this.handleRenameSession(session);
 		};
 
 		// Sync list events to header
@@ -863,59 +899,71 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		void this.loadScope("current", "initial");
 	}
 
-	private enterRenameMode(sessionPath: string, currentName: string | undefined): void {
-		this.mode = "rename";
-		this.renameTargetPath = sessionPath;
-		this.renameInput.setValue(currentName ?? "");
-		this.renameInput.focused = true;
+	private updateCachedSessionName(sessionPath: string, name: string): void {
+		const updateSessions = (sessions: SessionInfo[] | null): SessionInfo[] | null =>
+			sessions?.map((session) => (session.path === sessionPath ? { ...session, name } : session)) ?? null;
 
-		const panel = new Container();
-		panel.addChild(new Text(theme.bold("Rename Session"), 1, 0));
-		panel.addChild(new Spacer(1));
-		panel.addChild(this.renameInput);
-		panel.addChild(new Spacer(1));
-		panel.addChild(
-			new Text(
-				theme.fg("muted", `${keyText("tui.select.confirm")} to save · ${keyText("tui.select.cancel")} to cancel`),
-				1,
-				0,
-			),
-		);
+		this.currentSessions = updateSessions(this.currentSessions);
+		this.allSessions = updateSessions(this.allSessions);
 
-		this.buildBaseLayout(panel, { showHeader: false });
-		this.requestRender();
+		const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
+		this.sessionList.setSessions(sessions, this.scope === "all");
 	}
 
-	private exitRenameMode(): void {
-		this.mode = "list";
-		this.renameTargetPath = null;
-
-		this.buildBaseLayout(this.sessionList);
-
-		this.requestRender();
-	}
-
-	private async confirmRename(value: string): Promise<void> {
-		const next = value.trim();
-		if (!next) return;
-		const target = this.renameTargetPath;
-		if (!target) {
-			this.exitRenameMode();
-			return;
-		}
-
-		// Find current name for callback
+	private async handleRenameSession(session: SessionInfo): Promise<void> {
+		if (this.selectedRenaming || this.bulkRenaming || this.currentLoading || this.allLoading) return;
 		const renameSession = this.renameSession;
-		if (!renameSession) {
-			this.exitRenameMode();
-			return;
-		}
+		if (!renameSession) return;
+
+		this.selectedRenaming = true;
+		this.header.setStatusMessage({ type: "info", message: "Renaming selected session..." });
+		this.requestRender();
 
 		try {
-			await renameSession(target, next);
-			await this.refreshSessionsAfterMutation();
+			const name = (await renameSession(session))?.trim();
+			if (name) {
+				this.updateCachedSessionName(session.path, name);
+				this.header.setStatusMessage({ type: "info", message: `Renamed: ${name}` }, 3000);
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.header.setStatusMessage({ type: "error", message: `Failed to rename session: ${message}` }, 4000);
 		} finally {
-			this.exitRenameMode();
+			this.selectedRenaming = false;
+			this.requestRender();
+		}
+	}
+
+	private async handleRenameAllSessions(): Promise<void> {
+		if (this.bulkRenaming || this.currentLoading || this.allLoading) return;
+
+		this.bulkRenaming = true;
+		this.header.setStatusMessage({ type: "info", message: "Checking unnamed sessions..." });
+		this.requestRender();
+
+		try {
+			const sessions = await this.allSessionsLoader();
+			const unnamedSessions = sessions.filter((session) => !hasSessionName(session));
+			if (unnamedSessions.length === 0) {
+				this.header.setStatusMessage({ type: "info", message: "No unnamed sessions to rename" }, 3000);
+				return;
+			}
+
+			this.header.setStatusMessage({
+				type: "info",
+				message: `Renaming ${unnamedSessions.length} unnamed sessions...`,
+			});
+			this.requestRender();
+			const result = await this.renameAllSessions(unnamedSessions);
+			const suffix = result.failed > 0 ? `, ${result.failed} failed` : "";
+			this.header.setStatusMessage({ type: "info", message: `Renamed ${result.renamed} sessions${suffix}` }, 3000);
+			await this.refreshSessionsAfterMutation();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.header.setStatusMessage({ type: "error", message: `Failed to rename sessions: ${message}` }, 4000);
+		} finally {
+			this.bulkRenaming = false;
+			this.requestRender();
 		}
 	}
 

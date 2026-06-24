@@ -121,6 +121,24 @@ function createBunGlobalInstall(): { packageDir: string } {
 	return { packageDir };
 }
 
+function createSourceCheckout(): { repoRoot: string; packageDir: string } {
+	const repoRoot = mkdtempSync(join(tmpdir(), "pi-source-"));
+	const binDir = join(repoRoot, "bin");
+	const packageDir = join(repoRoot, "packages", "coding-agent");
+	mkdirSync(join(repoRoot, ".git"), { recursive: true });
+	mkdirSync(packageDir, { recursive: true });
+	mkdirSync(binDir, { recursive: true });
+	writeFileSync(join(packageDir, "package.json"), "{}\n");
+	writeFileSync(join(binDir, process.platform === "win32" ? "git.cmd" : "git"), createFakeGitScript());
+	chmodSync(join(binDir, process.platform === "win32" ? "git.cmd" : "git"), 0o755);
+	tempDir = repoRoot;
+	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
+	process.env.PI_PACKAGE_DIR = packageDir;
+	process.argv[1] = join(packageDir, "src", "main.ts");
+	setExecPath(join("usr", "local", "bin", "node"));
+	return { repoRoot, packageDir };
+}
+
 function createFakePnpmScript(root: string): string {
 	if (process.platform === "win32") {
 		return `@echo off\r\nif "%1"=="root" if "%2"=="-g" echo ${root}\r\n`;
@@ -145,6 +163,13 @@ function createFakeBunScript(bunBin: string): string {
 	return `#!/bin/sh\nif [ "$1" = "pm" ] && [ "$2" = "bin" ] && [ "$3" = "-g" ]; then\n\tprintf '%s\\n' '${escapedBunBin}'\n\texit 0\nfi\nexit 1\n`;
 }
 
+function createFakeGitScript(): string {
+	if (process.platform === "win32") {
+		return `@echo off\r\nif "%3"=="remote" (echo upstream&echo origin&exit /b 0)\r\nif "%3"=="symbolic-ref" (echo upstream/main&exit /b 0)\r\nexit /b 1\r\n`;
+	}
+	return `#!/bin/sh\nif [ "$3" = "remote" ]; then\n\tprintf 'upstream\\norigin\\n'\n\texit 0\nfi\nif [ "$3" = "symbolic-ref" ]; then\n\tprintf 'upstream/main\\n'\n\texit 0\nfi\nexit 1\n`;
+}
+
 describe("detectInstallMethod", () => {
 	test("detects pnpm from Windows .pnpm install paths", () => {
 		setExecPath(
@@ -158,6 +183,11 @@ describe("detectInstallMethod", () => {
 	});
 
 	test("does not self-update unknown wrapper installs", () => {
+		const packageDir = mkdtempSync(join(tmpdir(), "pi-unknown-"));
+		writeFileSync(join(packageDir, "package.json"), "{}\n");
+		tempDir = packageDir;
+		process.env.PI_PACKAGE_DIR = packageDir;
+		process.argv[1] = join(packageDir, "cli.js");
 		setExecPath("/usr/local/bin/node");
 
 		expect(detectInstallMethod()).toBe("unknown");
@@ -290,6 +320,41 @@ describe("detectInstallMethod", () => {
 		expect(getUpdateInstruction("@earendil-works/pi-coding-agent")).toBe(
 			"Run: npm install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-coding-agent",
 		);
+	});
+
+	test("self-updates source checkouts with a rebase autostash workflow", () => {
+		const { repoRoot } = createSourceCheckout();
+
+		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
+
+		expect(detectInstallMethod()).toBe("source");
+		expect(command).toEqual({
+			command: "git",
+			args: ["-C", repoRoot, "fetch", "upstream", "--tags", "--prune"],
+			display: `git -C ${repoRoot} fetch upstream --tags --prune && git -C ${repoRoot} rebase --autostash upstream/main && npm install --ignore-scripts && npm run build`,
+			steps: [
+				{
+					command: "git",
+					args: ["-C", repoRoot, "fetch", "upstream", "--tags", "--prune"],
+					display: `git -C ${repoRoot} fetch upstream --tags --prune`,
+				},
+				{
+					command: "git",
+					args: ["-C", repoRoot, "rebase", "--autostash", "upstream/main"],
+					display: `git -C ${repoRoot} rebase --autostash upstream/main`,
+				},
+				{
+					command: "npm",
+					args: ["install", "--ignore-scripts"],
+					display: "npm install --ignore-scripts",
+				},
+				{
+					command: "npm",
+					args: ["run", "build"],
+					display: "npm run build",
+				},
+			],
+		});
 	});
 
 	test("self-updates bun global installs from bun pm bin", () => {

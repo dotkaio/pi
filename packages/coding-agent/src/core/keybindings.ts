@@ -37,6 +37,7 @@ export interface AppKeybindings {
 	"app.session.togglePath": true;
 	"app.session.toggleSort": true;
 	"app.session.rename": true;
+	"app.session.renameAll": true;
 	"app.session.delete": true;
 	"app.session.deleteNoninvasive": true;
 	"app.models.save": true;
@@ -138,6 +139,10 @@ export const KEYBINDINGS = {
 	"app.session.rename": {
 		defaultKeys: "ctrl+r",
 		description: "Rename session",
+	},
+	"app.session.renameAll": {
+		defaultKeys: "shift+ctrl+r",
+		description: "Rename all sessions",
 	},
 	"app.session.delete": {
 		defaultKeys: "ctrl+d",
@@ -259,6 +264,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	toggleSessionPath: "app.session.togglePath",
 	toggleSessionSort: "app.session.toggleSort",
 	renameSession: "app.session.rename",
+	renameAllSessions: "app.session.renameAll",
 	deleteSession: "app.session.delete",
 	deleteSessionNoninvasive: "app.session.deleteNoninvasive",
 } as const satisfies Record<string, Keybinding>;
